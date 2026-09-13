@@ -1,0 +1,476 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // switch to "mysql" if you prefer MySQL, then run prisma migrate again
+  url      = env("DATABASE_URL")
+}
+
+// ---------- ROLES & PERMISSIONS (fully dynamic) ----------
+// Instead of hardcoding "Admin/Manager/Employee" checks everywhere,
+// each Role carries a JSON permission map. Add new roles or new
+// permission keys any time without touching the schema.
+model Role {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  permissions Json     // e.g. { "projects.manage": true, "tasks.assign": true }
+  isSystem    Boolean  @default(false) // prevents deletion of seeded roles
+  users       User[]
+  createdAt   DateTime @default(now())
+}
+
+model User {
+  id             Int              @id @default(autoincrement())
+  name           String
+  email          String           @unique
+  password       String
+  avatarUrl      String?
+  emailVerified  Boolean          @default(false)
+  pendingEmail   String?          // set while a new email awaits verification; swapped into `email` once confirmed
+  verifyToken    String?          @unique
+  verifyTokenExpiry DateTime?
+  otpCode        String?          // 6-digit email verification code (used instead of the link for new accounts / email changes)
+  otpExpiry      DateTime?
+  resetToken     String?          @unique
+  resetTokenExpiry DateTime?
+  bio            String?          // short "about me" shown on the profile page
+  phone          String?
+  jobTitle       String?          // free text, e.g. "Senior Developer" — separate from system Role
+  notificationPrefs Json?         // per-type booleans, e.g. { "task_assigned": true, "mention": false } — missing key defaults to "on"
+  isActive       Boolean          @default(true)
+  role           Role             @relation(fields: [roleId], references: [id])
+  roleId         Int
+  // Reporting hierarchy: who this person reports to. Used to restrict task
+  // assignment — a Manager/Team Lead can only assign tasks to their own
+  // (direct or indirect) reports; only Admin can assign to anyone.
+  manager        User?            @relation("ReportsTo", fields: [managerId], references: [id], onDelete: SetNull)
+  managerId      Int?
+  directReports  User[]           @relation("ReportsTo")
+  createdAt      DateTime         @default(now())
+  projectMembers ProjectMember[]
+  assignedTasks  Task[]           @relation("TaskAssignee")
+  createdTasks   Task[]           @relation("TaskCreator")
+  tasksAssignedByMe Task[]        @relation("TaskAssignedBy")
+  comments       TaskComment[]
+  attendance     Attendance[]
+  clientsCreated Client[]
+  clientsHandled Client[] @relation("ClientHandler")
+  clientHistoryAsPrevious ClientHandlerHistory[] @relation("ClientHistoryPreviousHandler")
+  clientHistoryAsNew      ClientHandlerHistory[] @relation("ClientHistoryNewHandler")
+  clientHistoryChanged    ClientHandlerHistory[] @relation("ClientHistoryChangedBy")
+  projectsCreated Project[]
+  notifications  Notification[]
+  conversationParticipants ConversationParticipant[]
+  conversationsCreated Conversation[] @relation("ConversationCreator")
+  messagesSent   Message[]
+  messageReactions MessageReaction[]
+  complaintsRaised   Complaint[] @relation("ComplaintRaisedBy")
+  complaintsResolved Complaint[] @relation("ComplaintResolvedBy")
+  dailyUpdates   DailyUpdate[]
+  taskAttachments TaskAttachment[]
+  activityLogs   ActivityLog[]
+  meetingsCreated Meeting[]        @relation("MeetingCreator")
+  meetingAttendance MeetingAttendee[]
+  timeEntries    TimeEntry[]
+}
+
+// ---------- DAILY / WEEKLY WORK UPDATES ----------
+// A lightweight per-day log entry each employee can post ("what I worked on
+// today"), separate from task comments — gives managers a running journal
+// per person without requiring every update to be tied to a specific task.
+model DailyUpdate {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  date      DateTime @default(now()) @db.Date
+  content   String
+  hoursSpent Float?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
+// ---------- CLIENTS ----------
+enum ClientEngagementType {
+  PART_TIME // 4 hours/day, 5 days/week — 20 hrs/week
+  FULL_TIME // 8 hours/day, 5 days/week — 40 hrs/week
+}
+
+model Client {
+  id          Int       @id @default(autoincrement())
+  name        String
+  company     String?
+  email       String?
+  phone       String?
+  address     String?
+  notes       String?
+  engagementType ClientEngagementType?
+  handledBy   User?     @relation("ClientHandler", fields: [handledById], references: [id])
+  handledById Int?
+  createdBy   User      @relation(fields: [createdById], references: [id])
+  createdById Int
+  projects    Project[]
+  meetingInvites MeetingGuest[]
+  handlerHistory ClientHandlerHistory[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// Every time a client's "Handled By" person changes, this records why —
+// whether it was handed off to someone else (a transfer) or the
+// engagement ended with no replacement (a termination, newHandlerId null).
+// This is the audit trail behind "why did this client leave this
+// employee's list" that a manager can review later.
+model ClientHandlerHistory {
+  id               Int      @id @default(autoincrement())
+  client           Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId         Int
+  previousHandler  User?    @relation("ClientHistoryPreviousHandler", fields: [previousHandlerId], references: [id], onDelete: SetNull)
+  previousHandlerId Int?
+  newHandler       User?    @relation("ClientHistoryNewHandler", fields: [newHandlerId], references: [id], onDelete: SetNull)
+  newHandlerId     Int?
+  reason           String
+  changedBy        User?    @relation("ClientHistoryChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  changedById      Int?
+  changedAt        DateTime @default(now())
+
+  @@index([clientId])
+  @@index([previousHandlerId])
+}
+
+// ---------- PROJECTS ----------
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+model Project {
+  id          Int             @id @default(autoincrement())
+  name        String
+  description String?
+  status      ProjectStatus   @default(PLANNED)
+  client      Client?         @relation(fields: [clientId], references: [id])
+  clientId    Int?
+  startDate   DateTime?
+  endDate     DateTime?
+  createdBy   User            @relation(fields: [createdById], references: [id])
+  createdById Int
+  members     ProjectMember[]
+  statuses    TaskStatus[]
+  tasks       Task[]
+  conversation Conversation? // group chat room for this project's team
+  portalToken String?         @unique // set when a read-only client portal link is generated
+  portalEnabled Boolean       @default(false)
+  meetings    Meeting[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+model ProjectMember {
+  id            Int      @id @default(autoincrement())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId     Int
+  user          User     @relation(fields: [userId], references: [id])
+  userId        Int
+  roleInProject String   @default("Member") // free text, e.g. "Lead", "Reviewer" — not tied to system Role
+  addedAt       DateTime @default(now())
+
+  @@unique([projectId, userId])
+}
+
+// ---------- DYNAMIC KANBAN: statuses are per-project, not fixed enum ----------
+// Each project defines its own columns/order/color, so one project can run
+// "To Do -> In Progress -> Done" and another "Backlog -> Design -> Dev -> QA -> Live".
+model TaskStatus {
+  id        Int      @id @default(autoincrement())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId Int
+  name      String
+  color     String   @default("#6B7280")
+  order     Int      @default(0)
+  isDefault Boolean  @default(false) // status new tasks land in
+  isDone    Boolean  @default(false) // marks this column as a "completed" column for reporting/counts
+  tasks     Task[]
+
+  @@unique([projectId, name])
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id          Int           @id @default(autoincrement())
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   Int
+  status      TaskStatus    @relation(fields: [statusId], references: [id])
+  statusId    Int
+  title       String
+  description String?
+  priority    TaskPriority  @default(MEDIUM)
+  order       Int           @default(0) // position within its status column
+  assignee    User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  assigneeId  Int?
+  createdBy   User          @relation("TaskCreator", fields: [createdById], references: [id])
+  createdById Int
+  // Who most recently assigned this task, and when — separate from createdBy,
+  // so reassigning a task to someone else updates who is accountable for the assignment.
+  assignedBy   User?        @relation("TaskAssignedBy", fields: [assignedById], references: [id])
+  assignedById Int?
+  assignedAt   DateTime?
+  dueDate     DateTime?
+  comments    TaskComment[]
+  attachments TaskAttachment[]
+  timeEntries TimeEntry[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+// Files attached directly to a task (separate from chat file sharing).
+model TaskAttachment {
+  id           Int      @id @default(autoincrement())
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId       Int
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  uploadedById Int
+  fileUrl      String
+  fileName     String
+  fileType     String?
+  fileSize     Int?
+  createdAt    DateTime @default(now())
+}
+
+model TaskComment {
+  id        Int      @id @default(autoincrement())
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  userId    Int
+  comment   String
+  createdAt DateTime @default(now())
+}
+
+// ---------- ATTENDANCE & BREAKS ----------
+model Attendance {
+  id        Int        @id @default(autoincrement())
+  user      User       @relation(fields: [userId], references: [id])
+  userId    Int
+  date      DateTime   @default(now()) @db.Date
+  checkIn   DateTime?
+  checkOut  DateTime?
+  breaks    BreakLog[]
+  breakAlertSent Boolean @default(false) // so the over-break notification only fires once per day
+
+  @@unique([userId, date])
+}
+
+model BreakLog {
+  id           Int        @id @default(autoincrement())
+  attendance   Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  attendanceId Int
+  type         String     @default("Break") // e.g. Lunch, Short Break, Tea Break — free text, dynamic
+  startTime    DateTime   @default(now())
+  endTime      DateTime?
+}
+
+// ---------- NOTIFICATIONS ----------
+model Notification {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  type      String   // "task_assigned" | "task_overdue" | "mention" | "complaint_update"
+  message   String
+  link      String?  // frontend route to open when clicked, e.g. "/projects/3"
+  refType   String?  // e.g. "task" — used with refId to avoid re-creating the same alert
+  refId     Int?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, type, refType, refId])
+}
+
+// ---------- CHAT: 1-on-1 direct messages + one group chat per project ----------
+enum ConversationType {
+  DIRECT
+  PROJECT
+  GROUP
+}
+
+model Conversation {
+  id           Int                       @id @default(autoincrement())
+  type         ConversationType
+  name         String?                   // set for GROUP conversations (custom, user-named groups)
+  project      Project?                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId    Int?                      @unique // one conversation per project for PROJECT type
+  createdBy    User?                     @relation("ConversationCreator", fields: [createdById], references: [id])
+  createdById  Int?
+  participants ConversationParticipant[]
+  messages     Message[]
+  createdAt    DateTime                  @default(now())
+}
+
+model ConversationParticipant {
+  id             Int          @id @default(autoincrement())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId Int
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         Int
+  lastReadAt     DateTime?
+
+  @@unique([conversationId, userId])
+}
+
+model Message {
+  id             Int          @id @default(autoincrement())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId Int
+  sender         User         @relation(fields: [senderId], references: [id])
+  senderId       Int
+  body           String?      // optional now: a message can be file-only
+  fileUrl        String?      // e.g. /uploads/chat/xxxx.png — served statically
+  fileName       String?      // original filename, for display/download
+  fileType       String?      // mime type, used to decide image preview vs generic file card
+  fileSize       Int?         // bytes, shown in the file chip
+  pinned         Boolean      @default(false)
+  pinnedAt       DateTime?
+  createdAt      DateTime     @default(now())
+  reactions      MessageReaction[]
+
+  @@index([conversationId, createdAt])
+}
+
+// Lightweight emoji reactions, one row per (message, user, emoji) so a user
+// can react with several different emoji but not double-react with the same one.
+model MessageReaction {
+  id        Int      @id @default(autoincrement())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  emoji     String
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, userId, emoji])
+}
+
+// ---------- COMPLAINTS ----------
+enum ComplaintStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+model Complaint {
+  id             Int             @id @default(autoincrement())
+  raisedBy       User            @relation("ComplaintRaisedBy", fields: [raisedById], references: [id])
+  raisedById     Int
+  subject        String
+  description    String
+  status         ComplaintStatus @default(OPEN)
+  resolvedBy     User?           @relation("ComplaintResolvedBy", fields: [resolvedById], references: [id])
+  resolvedById   Int?
+  resolutionNote String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+// ---------- ACTIVITY / AUDIT LOG ----------
+// A lightweight, append-only trail of who did what. Not exhaustive of every
+// possible mutation — instrumented at the points that matter most for an
+// audit trail (create/update/delete on users, projects, tasks, clients).
+model ActivityLog {
+  id          Int      @id @default(autoincrement())
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId      Int?
+  action      String   // e.g. "created", "updated", "deleted", "deactivated"
+  entityType  String   // e.g. "Project", "Task", "User", "Client"
+  entityId    Int?
+  description String   // human-readable summary, e.g. "created project \"Website Redesign\""
+  createdAt   DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ---------- MEETINGS (calendar booking) ----------
+model Meeting {
+  id          Int               @id @default(autoincrement())
+  title       String
+  description String?
+  startTime   DateTime
+  endTime     DateTime
+  location    String?           // physical room, or a video call URL
+  project     Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId   Int?
+  createdBy   User              @relation("MeetingCreator", fields: [createdById], references: [id])
+  createdById Int
+  attendees   MeetingAttendee[]
+  guests      MeetingGuest[]    // external, non-login invitees — typically clients
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([startTime])
+}
+
+// An external invitee who doesn't have a TeamFlow login — usually a client.
+// They're emailed the meeting details directly; there's no in-app RSVP
+// since they can't log in, just a note of who was invited and whether the
+// email successfully sent.
+model MeetingGuest {
+  id        Int      @id @default(autoincrement())
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  meetingId Int
+  client    Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  clientId  Int?
+  name      String?
+  email     String
+  emailSent Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+enum MeetingRsvp {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model MeetingAttendee {
+  id        Int         @id @default(autoincrement())
+  meeting   Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  meetingId Int
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  rsvp      MeetingRsvp @default(PENDING)
+
+  @@unique([meetingId, userId])
+}
+
+// ---------- TIME TRACKING ----------
+// Supports both modes: a running timer (endTime null until stopped) and a
+// manually logged entry (startTime/endTime given up front).
+model TimeEntry {
+  id              Int       @id @default(autoincrement())
+  task            Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId          Int
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId          Int
+  startTime       DateTime
+  endTime         DateTime?
+  durationSeconds Int?      // computed on stop/manual entry; null while a timer is running
+  note            String?
+  createdAt       DateTime  @default(now())
+
+  @@index([taskId])
+  @@index([userId])
+}

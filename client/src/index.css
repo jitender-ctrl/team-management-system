@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-50 text-slate-800;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/*
+  App-wide dark theme.
+
+  Most pages use plain Tailwind utility classes like `bg-white`,
+  `bg-slate-50/100`, `text-slate-800`, and `border` directly rather than a
+  shared "card"/"surface" component, so rather than touching every page,
+  we retarget those specific utility classes when the `.dark` class is on
+  <html> (toggled by ThemeContext). Pages built after this point should
+  prefer explicit `dark:` variants; this block is the safety net that keeps
+  older pages readable in dark mode without a rewrite.
+*/
+.dark body {
+  @apply bg-slate-900 text-slate-100;
+}
+
+.dark .bg-white {
+  background-color: theme("colors.slate.800");
+}
+
+.dark .bg-slate-50 {
+  background-color: theme("colors.slate.900");
+}
+
+.dark .bg-slate-100 {
+  background-color: theme("colors.slate.700");
+}
+
+.dark .text-slate-800 {
+  color: theme("colors.slate.100");
+}
+
+.dark .text-slate-700 {
+  color: theme("colors.slate.200");
+}
+
+.dark .text-slate-500 {
+  color: theme("colors.slate.400");
+}
+
+.dark .text-slate-400 {
+  color: theme("colors.slate.500");
+}
+
+.dark .border,
+.dark .border-t,
+.dark .border-b,
+.dark .border-r,
+.dark .border-l {
+  border-color: theme("colors.slate.700");
+}
+
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: theme("colors.slate.900");
+  color: theme("colors.slate.100");
+  border-color: theme("colors.slate.600");
+}
+
+.dark ::placeholder {
+  color: theme("colors.slate.500");
+}
+
+.dark .shadow {
+  --tw-shadow-color: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.4), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+}
+
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover {
+  background-color: theme("colors.slate.700");
+}
+
+/* Scrollbars, so long lists (chat, tables) don't look jarring in dark mode */
+.dark ::-webkit-scrollbar-track {
+  background: theme("colors.slate.900");
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: theme("colors.slate.600");
+  border-radius: 9999px;
+}
